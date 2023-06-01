@@ -53,11 +53,11 @@ This tool was designed to be used on pentests, primarily to execute malicious po
 
 You can transfer the output DLL to your target system and load it into powershell various ways. For example, it can be done via P/Invoke with LoadLibrary:
 
-![image](https://github.com/icyguider/external_files/assets/79864975/f3038b0c-bc7d-4ad3-92cb-de45a8f73ad0)
+![image](https://github.com/icyguider/LightsOut/assets/79864975/75358813-e1bf-4a2b-8059-d539ac97c510)
 
 Or even easier, copy powershell to an arbitrary location and side load the DLL!
 
-![image](https://github.com/icyguider/external_files/assets/79864975/72080bd6-56f1-46dd-a0f5-d7239da4393f)
+![image](https://github.com/icyguider/LightsOut/assets/79864975/e79c8cca-5e4e-4fb8-a4b5-4b888006b4cf)
 
 **Greetz/Credit/Further Reference:**
 * [@RastaMouse](https://twitter.com/_RastaMouse) for their blog post on patching AMSI: https://rastamouse.me/memory-patching-amsi-bypass/
